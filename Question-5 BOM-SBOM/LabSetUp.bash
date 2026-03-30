@@ -3,21 +3,13 @@ set -euo pipefail
 
 NAMESPACE="sbom"
 DEPLOY_FILE="${HOME}/alpine-deploy.yaml"
-TRIVY_VERSION="v0.58.0"
+TRIVY_VERSION="0.58.0" # Removed 'v' for the direct download URL
 BOM_VERSION="v0.6.0"
 INSTALL_DIR="/usr/local/bin"
 
-log() {
-  echo "🔹 $1"
-}
-
-warn() {
-  echo "⚠️  $1"
-}
-
-success() {
-  echo "✅ $1"
-}
+log() { echo "🔹 $1"; }
+warn() { echo "⚠️  $1"; }
+success() { echo "✅ $1"; }
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1
@@ -29,20 +21,21 @@ install_trivy() {
     return
   fi
 
-  log "Installing Trivy..."
-  if require_cmd curl; then
-    curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "${INSTALL_DIR}" "${TRIVY_VERSION}" || {
-      warn "Automatic Trivy installation failed."
-      warn "Install manually with:"
-      echo "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ${INSTALL_DIR}"
-      return 1
-    }
+  log "Installing Trivy ${TRIVY_VERSION}..."
+  # Use a direct binary download if the install script fails
+  # Adjusting for x86_64 Linux - common for CKS environments
+  curl -Lo trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+  tar xzf trivy.tar.gz trivy
+  
+  # Try to move to /usr/local/bin, fallback to current dir if permission denied
+  sudo mv trivy "${INSTALL_DIR}/" 2>/dev/null || mv trivy ./
+  rm trivy.tar.gz
+  
+  if require_cmd trivy || [ -f "./trivy" ]; then
+    success "Trivy ready."
   else
-    warn "curl not found. Cannot auto-install Trivy."
-    return 1
+    warn "Trivy installation failed. Run: sudo apt-get install trivy"
   fi
-
-  log "Trivy installed successfully: $(trivy --version | head -n 1)"
 }
 
 install_bom() {
@@ -52,36 +45,25 @@ install_bom() {
   fi
 
   log "Installing bom..."
-  if require_cmd curl; then
-    curl -fsSL -o "${INSTALL_DIR}/bom" \
-      "https://github.com/kubernetes-sigs/bom/releases/download/${BOM_VERSION}/bom-amd64-linux" || {
-      warn "Automatic bom installation failed."
-      warn "Install manually from: https://github.com/kubernetes-sigs/bom"
-      return 1
-    }
-    chmod +x "${INSTALL_DIR}/bom"
-    log "bom installed successfully"
-  else
-    warn "curl not found. Cannot auto-install bom."
-    return 1
-  fi
+  curl -fsSL -o "bom" "https://github.com/kubernetes-sigs/bom/releases/download/${BOM_VERSION}/bom-amd64-linux"
+  chmod +x "bom"
+  sudo mv bom "${INSTALL_DIR}/" 2>/dev/null || log "bom kept in current directory (no sudo)"
 }
 
-log "Checking required tools..."
-if ! require_cmd kubectl; then
-  echo "❌ kubectl is required but not installed."
-  exit 1
-fi
+# --- Execution Starts Here ---
 
-if ! require_cmd curl; then
-  echo "❌ curl is required but not installed."
-  exit 1
-fi
+log "Checking dependencies..."
+for cmd in kubectl curl tar; do
+  if ! require_cmd "$cmd"; then
+    echo "❌ $cmd is required. Please install it first."
+    exit 1
+  fi
+done
 
 log "Creating namespace: ${NAMESPACE}"
 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-log "Creating deployment YAML file at ${DEPLOY_FILE}..."
+log "Creating deployment YAML..."
 cat <<EOF > "${DEPLOY_FILE}"
 apiVersion: apps/v1
 kind: Deployment
@@ -110,16 +92,11 @@ spec:
         command: ["sleep", "3600"]
 EOF
 
-log "Applying the deployment..."
+log "Applying deployment..."
 kubectl apply -f "${DEPLOY_FILE}"
 
-install_trivy || true
-install_bom || true
+install_trivy
+install_bom
 
 echo ""
 success "Lab setup complete!"
-echo "   - Namespace: ${NAMESPACE}"
-echo "   - Deployment: alpine-multi (3 containers: alpine-v1, alpine-v2, alpine-v3)"
-echo "   - Deployment YAML: ${DEPLOY_FILE}"
-echo "   - Tools available: trivy, bom"
-echo "   - Your task: find the vulnerable container, remove it, generate SPDX report"
